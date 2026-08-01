@@ -103,8 +103,8 @@ false), mirroring the wasm compare-against-`G-FALSE`.
 ## Runtime kernel
 
 A few hundred lines of JS prepended to every emitted program: the
-sentinel objects, the classes above, `%mem-*` over one growable
-`ArrayBuffer` (64 KB pages), `%f32x4-*` as scalar loops over a
+sentinel objects, the classes above, `%mem-*` over one basic
+`WebAssembly.Memory` (64 KB pages), `%f32x4-*` as scalar loops over a
 `Float32Array` view, and IO hooks (`write_byte`/`read_byte`) supplied
 by the embedder exactly like the wasm `io` imports.  Everything else
 -- generic arithmetic, the numeric tower, string/list library -- is
@@ -127,6 +127,10 @@ on both hosts (texts must be identical) and runs on node; its output
 must equal the `;; expect:` line -- the same oracle the wasm target
 answers to, so wasm/JS behavioral parity is checked test-by-test with
 zero new fixtures.  Skips are defects, per repo policy.
+
+`test/js-backend-errors.mjs` covers parity that the one-value oracle
+cannot express: traps, dynamic arity failures, and host-visible export
+names.
 
 ## Known non-goals
 

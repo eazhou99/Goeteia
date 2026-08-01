@@ -334,8 +334,8 @@
       (errorf 'goeteia "call/cc needs the $escape/$winders runtime"))
     (list "(()=>{const " t "={t:\"pair\",a:NIL,d:NIL}," w "="
           (jvar-name (cdr wv))
-          ";try{return (" (jx (cadr e) env lctx) ")((" x ")=>"
-          (jfn-name '$escape (cadr esc)) "(" t "," w "," x "));}catch("
+          ";try{return IC((" (jx (cadr e) env lctx) "),[(" x ")=>"
+          (jfn-name '$escape (cadr esc)) "(" t "," w "," x ")]);}catch("
           ex "){if(" ex " instanceof Esc&&" ex ".p.a===" t ")return "
           ex ".p.d;throw " ex ";}})()")))
 
@@ -345,13 +345,23 @@
                                 args))
         ")"))
 
+;; Indirect calls carry no compile-time arity proof.  Native JS
+;; functions accept missing parameters as undefined, while the wasm
+;; generic adapter traps while unpacking them, so route these through
+;; the kernel's minimum-arity check.
+(define (jicall fcode args env lctx)
+  (list "IC(" fcode ",["
+        (jsep "," (map-in-order (lambda (a) (list "(" (jx a env lctx) ")"))
+                                 args))
+        "])"))
+
 (define (jx-app e env lctx)
   (let* ((op (car e))
          (args (cdr e))
          (rop (and (symbol? op) (unmark op))))
     (cond
      ((and (symbol? op) (assq op env))
-      (jcall (list "(" (cdr (assq op env)) ")") args env lctx))
+      (jicall (list "(" (cdr (assq op env)) ")") args env lctx))
      ((and rop (memq rop primitives) (not (assq rop *fns*)))
       (jp rop args (map-in-order (lambda (a) (jx a env lctx)) args)))
      ((and rop (assq rop *fns*))
@@ -365,9 +375,9 @@
               (errorf 'goeteia "wrong argument count in ~s" e)))
         (jcall (jfn-name rop (car entry)) args env lctx)))
      ((and rop (assq rop *vars*))
-      (jcall (list "(" (jvar-name (cdr (assq rop *vars*))) ")") args env lctx))
+      (jicall (list "(" (jvar-name (cdr (assq rop *vars*))) ")") args env lctx))
      ((pair? op)
-      (jcall (list "(" (jx op env lctx) ")") args env lctx))
+      (jicall (list "(" (jx op env lctx) ")") args env lctx))
      (else (errorf 'goeteia "cannot call ~s" op)))))
 
 ;; test position: a raw JS boolean; the predicate set the wasm
@@ -568,9 +578,8 @@
     ((char->integer) (list "(" (a 0) "&-2)"))
     ((integer->char) (list "(" (a 0) "|1)"))
     ((string-length) (list "(" (a 0) ".length<<1)"))
-    ((string-ref) (list "(((" (a 0) "[" (a 1) ">>1])<<1)|1)"))
-    ((string-set!)
-     (list "((" (a 0) "[" (a 1) ">>1]=(" (a 2) ")>>1),VOID)"))
+    ((string-ref) (list "((AR(" (a 0) "," (a 1) ")<<1)|1)"))
+    ((string-set!) (list "AW(" (a 0) "," (a 1) "," (a 2) ">>1)"))
     ((symbol->string) (list "(" (a 0) ".s)"))
     ((%make-string) (list "(new Uint8Array(" (a 0) ">>1))"))
     ((%make-symbol) (list "(new Sym(" (a 0) "))"))
@@ -580,15 +589,15 @@
     ((%make-vector)
      (list "(new Array(" (a 0) ">>1).fill(" (a 1) "))"))
     ((vector-length) (list "(" (a 0) ".length<<1)"))
-    ((vector-ref) (list "(" (a 0) "[" (a 1) ">>1])"))
-    ((vector-set!) (list "((" (a 0) "[" (a 1) ">>1]=" (a 2) "),VOID)"))
+    ((vector-ref) (list "AR(" (a 0) "," (a 1) ")"))
+    ((vector-set!) (list "AW(" (a 0) "," (a 1) "," (a 2) ")"))
     ((bytevector?) (list "((" (a 0) " instanceof BV)?TRUE:FALSE)"))
     ((%make-bytevector)
      (list "(new BV(new Uint8Array(" (a 0) ">>1).fill(" (a 1) ">>1)))"))
     ((bytevector-length) (list "(" (a 0) ".u.length<<1)"))
-    ((bytevector-u8-ref) (list "(" (a 0) ".u[" (a 1) ">>1]<<1)"))
+    ((bytevector-u8-ref) (list "(AR(" (a 0) ".u," (a 1) ")<<1)"))
     ((bytevector-u8-set!)
-     (list "((" (a 0) ".u[" (a 1) ">>1]=(" (a 2) ")>>1),VOID)"))
+     (list "AW(" (a 0) ".u," (a 1) "," (a 2) ">>1)"))
     ;; fixnum bitwise, straight on the tagged representation
     ((bitwise-and) (list "(" (a 0) "&" (a 1) ")"))
     ((bitwise-ior) (list "(" (a 0) "|" (a 1) ")"))
@@ -621,18 +630,14 @@
     ((%fwrite) (list "((IO.fwrite(" (a 0) ">>1," (a 1) ">>1)),VOID)"))
     ((%fclose) (list "((IO.fclose(" (a 0) ">>1)),VOID)"))
     ;; the linear staging memory
-    ((%mem-u8-ref) (list "(MEMU[" (a 0) ">>1]<<1)"))
-    ((%mem-u8-set!)
-     (list "((MEMU[" (a 0) ">>1]=(" (a 1) ")>>1),VOID)"))
-    ((%mem-i32-ref) (list "(W(MEMV.getInt32(" (a 0) ">>1,true)))"))
-    ((%mem-i32-set!)
-     (list "((MEMV.setInt32(" (a 0) ">>1,(" (a 1) ")>>1,true)),VOID)"))
-    ((%mem-f32-ref) (list "(new Fl(MEMV.getFloat32(" (a 0) ">>1,true)))"))
-    ((%mem-f32-set!)
-     (list "((MEMV.setFloat32(" (a 0) ">>1," (a 1) ".v,true)),VOID)"))
-    ((%mem-f64-ref) (list "(new Fl(MEMV.getFloat64(" (a 0) ">>1,true)))"))
-    ((%mem-f64-set!)
-     (list "((MEMV.setFloat64(" (a 0) ">>1," (a 1) ".v,true)),VOID)"))
+    ((%mem-u8-ref) (list "M8R(" (a 0) ")"))
+    ((%mem-u8-set!) (list "M8W(" (a 0) "," (a 1) ")"))
+    ((%mem-i32-ref) (list "M32R(" (a 0) ")"))
+    ((%mem-i32-set!) (list "M32W(" (a 0) "," (a 1) ")"))
+    ((%mem-f32-ref) (list "MF32R(" (a 0) ")"))
+    ((%mem-f32-set!) (list "MF32W(" (a 0) "," (a 1) ")"))
+    ((%mem-f64-ref) (list "MF64R(" (a 0) ")"))
+    ((%mem-f64-set!) (list "MF64W(" (a 0) "," (a 1) ")"))
     ((%mem-size) "(MSIZE())")
     ((%mem-grow) (list "(W(MGROW(" (a 0) ">>1)))"))
     ;; SIMD as scalar loops; single-rounded per lane, like f32x4
@@ -713,38 +718,57 @@
     "for(let i=xs.length-1;i>=0;i--)l={t:\"pair\",a:xs[i],d:l};return l;};"
     "const LD=(xs,tl)=>{let l=tl;"
     "for(let i=xs.length-1;i>=0;i--)l={t:\"pair\",a:xs[i],d:l};return l;};"
-    ;; (apply f pre lst)
+    ;; checked indirect call / (apply f pre lst).  Function.length is
+    ;; exactly the fixed prefix for both fixed and rest-argument arrows.
+    "const IC=(f,xs)=>{if(xs.length<f.length)"
+    "throw new TypeError('wrong argument count');return f(...xs);};"
     "const A2=(f,pre,l)=>{const xs=pre;"
-    "for(;l!==NIL;l=l.d)xs.push(l.a);return f(...xs);};"
+    "for(;l!==NIL;l=l.d)xs.push(l.a);return IC(f,xs);};"
     "const UNR=()=>{throw new Error('unreachable');};"
     "const THR=(tk,v)=>{throw new Esc({t:\"pair\",a:tk,d:v});};"
     "const KFIX=(x)=>(typeof x==='number'&&!(x&1))?TRUE:FALSE;"
     "const KCHR=(x)=>(typeof x==='number'&&(x&1)===1)?TRUE:FALSE;"
     "const KBOOL=(x)=>(x===TRUE||x===FALSE)?TRUE:FALSE;"
     "const KREC=(x,r)=>(x instanceof Rec&&x.f[0]===r)?TRUE:FALSE;"
-    ;; the linear staging memory: one growable buffer of 64 KiB pages
-    "let MEMB=new ArrayBuffer(65536),MEMV=new DataView(MEMB),"
-    "MEMU=new Uint8Array(MEMB);"
-    "const MSIZE=()=>W(MEMB.byteLength/65536);"
-    "const MGROW=(n)=>{const old=MEMB.byteLength/65536;"
-    "const nb=new ArrayBuffer((old+n)*65536);"
-    "new Uint8Array(nb).set(MEMU);"
-    "MEMB=nb;MEMV=new DataView(nb);MEMU=new Uint8Array(nb);return old;};"
-    "const MEMOBJ={get buffer(){return MEMB;}};"
-    ;; f32x4 kernels: per-lane scalar ops, one rounding per store
-    "const F4=(op,d,p,q)=>{for(let i=0;i<16;i+=4){"
-    "const x=MEMV.getFloat32(p+i,true),y=MEMV.getFloat32(q+i,true);"
-    "MEMV.setFloat32(d+i,op==='+'?x+y:op==='-'?x-y:x*y,true);}};"
-    "const F4SC=(d,p,s)=>{const sf=Math.fround(s);"
-    "for(let i=0;i<16;i+=4)"
-    "MEMV.setFloat32(d+i,MEMV.getFloat32(p+i,true)*sf,true);};"
-    "const F4AX=(d,p,q,s)=>{const sf=Math.fround(s);"
-    "for(let i=0;i<16;i+=4)MEMV.setFloat32(d+i,"
-    "MEMV.getFloat32(p+i,true)+Math.fround(MEMV.getFloat32(q+i,true)*sf),"
-    "true);};"
-    "const F4D=(p,q)=>{const fr=Math.fround;let r=fr(fr(MEMV.getFloat32(p,true)*MEMV.getFloat32(q,true))+fr(MEMV.getFloat32(p+4,true)*MEMV.getFloat32(q+4,true)));"
-    "r=fr(r+fr(MEMV.getFloat32(p+8,true)*MEMV.getFloat32(q+8,true)));"
-    "r=fr(r+fr(MEMV.getFloat32(p+12,true)*MEMV.getFloat32(q+12,true)));"
+    ;; checked array operations: JS arrays/typed arrays otherwise return
+    ;; undefined or silently ignore an out-of-range write.
+    "const OOB=()=>{throw new RangeError('array element access out of bounds');};"
+    "const IX=(a,i)=>{i>>=1;if(i<0||i>=a.length)OOB();return i;};"
+    "const AR=(a,i)=>a[IX(a,i)];"
+    "const AW=(a,i,v)=>{a[IX(a,i)]=v;return VOID;};"
+    ;; Basic WebAssembly.Memory is available on the no-WasmGC hosts this
+    ;; backend targets.  It gives grow its real failure/detachment semantics.
+    "const MEMOBJ=new WebAssembly.Memory({initial:1});"
+    "let MEMB=MEMOBJ.buffer,MEMV=new DataView(MEMB),MEMU=new Uint8Array(MEMB);"
+    "const MREF=()=>{const b=MEMOBJ.buffer;if(b!==MEMB){MEMB=b;"
+    "MEMV=new DataView(b);MEMU=new Uint8Array(b);}};"
+    "const MP=(p,n)=>{p>>=1;if(p<0||p+n>MEMB.byteLength)OOB();return p;};"
+    "const M8R=(p)=>{MREF();return MEMU[MP(p,1)]<<1;};"
+    "const M8W=(p,v)=>{MREF();MEMU[MP(p,1)]=v>>1;return VOID;};"
+    "const M32R=(p)=>{MREF();return W(MEMV.getInt32(MP(p,4),true));};"
+    "const M32W=(p,v)=>{MREF();MEMV.setInt32(MP(p,4),v>>1,true);return VOID;};"
+    "const MF32R=(p)=>{MREF();return new Fl(MEMV.getFloat32(MP(p,4),true));};"
+    "const MF32W=(p,v)=>{MREF();MEMV.setFloat32(MP(p,4),v.v,true);return VOID;};"
+    "const MF64R=(p)=>{MREF();return new Fl(MEMV.getFloat64(MP(p,8),true));};"
+    "const MF64W=(p,v)=>{MREF();MEMV.setFloat64(MP(p,8),v.v,true);return VOID;};"
+    "const MSIZE=()=>W(MEMOBJ.buffer.byteLength/65536);"
+    "const MGROW=(n)=>{try{const old=MEMOBJ.grow(n>>>0);MREF();return old;}"
+    "catch(_){return -1;}};"
+    ;; f32x4 kernels: snapshot all lanes before the first store, as the
+    ;; wasm backend's two v128.load instructions do for partial overlaps.
+    "const FV=(p)=>[MEMV.getFloat32(p,true),MEMV.getFloat32(p+4,true),"
+    "MEMV.getFloat32(p+8,true),MEMV.getFloat32(p+12,true)];"
+    "const F4=(op,d,p,q)=>{MREF();const x=FV(p),y=FV(q);"
+    "for(let i=0;i<4;i++)MEMV.setFloat32(d+i*4,"
+    "op==='+'?x[i]+y[i]:op==='-'?x[i]-y[i]:x[i]*y[i],true);};"
+    "const F4SC=(d,p,s)=>{MREF();const sf=Math.fround(s),x=FV(p);"
+    "for(let i=0;i<4;i++)MEMV.setFloat32(d+i*4,x[i]*sf,true);};"
+    "const F4AX=(d,p,q,s)=>{MREF();const sf=Math.fround(s),x=FV(p),y=FV(q);"
+    "for(let i=0;i<4;i++)MEMV.setFloat32(d+i*4,"
+    "x[i]+Math.fround(y[i]*sf),true);};"
+    "const F4D=(p,q)=>{MREF();const x=FV(p),y=FV(q),fr=Math.fround;"
+    "let r=fr(fr(x[0]*y[0])+fr(x[1]*y[1]));"
+    "r=fr(r+fr(x[2]*y[2]));r=fr(r+fr(x[3]*y[3]));"
     "return r;};"
     ;; JS FFI: nameBuf/argStack protocol, implemented natively.  The
     ;; instance global mirrors the wasm host bridge: __goeteia_*
@@ -752,6 +776,7 @@
     ;; eval sees this instance's globalThis
     "const NB=[],CBS=[];let AS=[],STG=[];"
     "const TD=new TextDecoder(),TE=new TextEncoder();"
+    "const U=(s)=>TD.decode(S(s));"
     "const TDX=()=>{const s=TD.decode(new Uint8Array(NB));NB.length=0;"
     "return s;};"
     "const LG=new Map();"
@@ -789,13 +814,15 @@
           (jgeneric '$mul2) "(a,b);};"))
    ((string=? name "JQUO")
     (list "const JQUO=(a,b)=>{if(typeof a==='number'&&typeof b==='number')"
-          "return W((a>>1)/(b>>1)|0);return "
+          "{const d=b>>1;if(d===0)throw new RangeError('divide by zero');"
+          "return W(Math.trunc((a>>1)/d));}return "
           (jgeneric '$quot2) "(a,b);};"))
    ((string=? name "JREM")
-    ;; operands stay tagged (2a % 2b = 2(a%b)); renormalize to i31
+     ;; operands stay tagged (2a % 2b = 2(a%b)); renormalize to i31
     ;; like ref.i31, with no extra shift
     (list "const JREM=(a,b)=>{if(typeof a==='number'&&typeof b==='number')"
-          "return ((a%b)<<1)>>1;return " (jgeneric '$rem2) "(a,b);};"))
+          "{if(b===0)throw new RangeError('divide by zero');"
+          "return ((a%b)<<1)>>1;}return " (jgeneric '$rem2) "(a,b);};"))
    ((string=? name "JEQN")
     (list "const JEQN=(a,b)=>(typeof a==='number'&&typeof b==='number')"
           "?a===b:(" (jgeneric '$eq2) "(a,b)!==FALSE);"))
@@ -932,7 +959,7 @@
                (let ((f (assq n *fns*)))
                  (unless f
                    (errorf 'goeteia "exported name is not a function ~s" n))
-                 (list (jstring-lit (symbol->string n)) ":"
+                 (list "[U(" (jstring-lit (symbol->string n)) ")]:"
                        (jfn-name n (cadr f)))))
              export-names)))
       (jbytes
