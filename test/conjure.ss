@@ -81,6 +81,15 @@
   (and (has? lib-section "<script type=\"goeteia/js\"")
        (has? lib-section "loadGoeteiaAuto('data:application/wasm;base64,")))
 
+;; Mount-shaped quasiquoted data stays data, while a mount point in an
+;; active unquote still compiles normally.
+(define quasiquoted `(conjure js (display 1)))
+(define unquoted `(section ,(conjure js (display 1))))
+(define quasiquote-ok
+  (and (equal? quasiquoted '(conjure js (display 1)))
+       (string? (cadr unquoted))
+       (has? (cadr unquoted) "main();")))
+
 ;; a second auto section gets the next id
 (define auto2 (conjure auto (display 2)))
 (define id2-ok
@@ -112,4 +121,4 @@
              (= b0 0))))))            ; wasm magic starts 0x00
 
 (and js-ok wasm-ok wasm-url-ok auto-ok id2-ok macro-sections-ok wrote-ok
-     lib-ok)
+     lib-ok quasiquote-ok)

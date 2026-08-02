@@ -3730,10 +3730,28 @@
     (define-wasm . wasm)
     (define-wasm-js . auto)))
 
+(define (embed-expand-quasi form depth)
+  ;; Inside quasiquote, mount-shaped pairs are data.  Only an unquote
+  ;; that returns to depth zero contains live expressions to expand.
+  (cond
+   ((not (pair? form)) form)
+   ((and (symbol? (car form))
+         (eq? (unmark (car form)) 'quasiquote))
+    (cons (car form) (embed-expand-quasi (cdr form) (+ depth 1))))
+   ((and (symbol? (car form))
+         (memq (unmark (car form)) '(unquote unquote-splicing)))
+    (if (= depth 1)
+        (cons (car form) (map-in-order embed-expand (cdr form)))
+        (cons (car form) (embed-expand-quasi (cdr form) (- depth 1)))))
+   (else (cons (embed-expand-quasi (car form) depth)
+               (embed-expand-quasi (cdr form) depth)))))
+
 (define (embed-expand form)
   (cond
    ((not (pair? form)) form)
    ((and (symbol? (car form)) (eq? (unmark (car form)) 'quote)) form)
+   ((and (symbol? (car form)) (eq? (unmark (car form)) 'quasiquote))
+    (cons (car form) (embed-expand-quasi (cdr form) 1)))
    ((and (symbol? (car form))
          (assq (unmark (car form)) $conjure-forms))
     (let ((e (assq (unmark (car form)) $conjure-forms)))
